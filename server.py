@@ -1122,7 +1122,10 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-# Inclure le router dans l'app
+# ============================================================================
+# INCLURE LE ROUTER
+# ============================================================================
+
 app.include_router(api_router)
 
 # Shutdown handler
