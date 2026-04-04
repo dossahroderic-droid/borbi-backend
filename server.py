@@ -21,9 +21,6 @@ import cloudinary.uploader
 from models import *
 from utils import *
 
-# Import pour l'IA
-from emergentintegrations.llm.chat import LlmChat, UserMessage
-
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
@@ -42,7 +39,6 @@ cloudinary.config(
 
 # Configuration
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "pauledoux@protonmail.com")
-EMERGENT_LLM_KEY = os.getenv("EMERGENT_LLM_KEY")
 
 # Création de l'application
 app = FastAPI(title="Bor-bi Tech API", version="1.0.0")
@@ -72,7 +68,6 @@ logger = logging.getLogger(__name__)
 async def register(user_data: UserCreate):
     """Inscription d'un nouvel utilisateur"""
     try:
-        # Vérifier si l'utilisateur existe déjà
         existing = None
         if user_data.email:
             existing = await db.users.find_one({"email": user_data.email})
@@ -82,7 +77,6 @@ async def register(user_data: UserCreate):
         if existing:
             raise HTTPException(status_code=400, detail="Utilisateur déjà existant")
         
-        # Créer l'utilisateur
         user = User(
             id=str(uuid.uuid4()),
             email=user_data.email,
@@ -92,11 +86,7 @@ async def register(user_data: UserCreate):
         )
         
         await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
-        
-        # Créer le token JWT
         token = create_jwt_token(user.id, user.role.value, user.email, user.phone)
-        
-        # Log audit
         await log_audit(db, user.id, user.email or user.phone or "unknown", "register", {"role": user.role.value})
         
         return {
@@ -117,7 +107,6 @@ async def register(user_data: UserCreate):
 async def login(credentials: UserLogin):
     """Connexion utilisateur"""
     try:
-        # Rechercher l'utilisateur
         user = await db.users.find_one({
             "$or": [
                 {"email": credentials.identifier},
@@ -128,14 +117,12 @@ async def login(credentials: UserLogin):
         if not user:
             raise HTTPException(status_code=401, detail="Identifiants invalides")
         
-        # Vérifier le mot de passe
         if credentials.password:
             if not user.get("passwordHash"):
                 raise HTTPException(status_code=401, detail="Mot de passe non configuré")
             if not verify_password(credentials.password, user["passwordHash"]):
                 raise HTTPException(status_code=401, detail="Identifiants invalides")
         
-        # Créer le token
         token = create_jwt_token(
             user["id"],
             user["role"],
@@ -143,7 +130,6 @@ async def login(credentials: UserLogin):
             user.get("phone")
         )
         
-        # Log audit
         await log_audit(db, user["id"], user.get("email") or user.get("phone"), "login")
         
         return {
@@ -166,11 +152,9 @@ async def login(credentials: UserLogin):
 async def request_otp(otp_request: OtpRequest):
     """Demande d'OTP par téléphone"""
     try:
-        # Générer le code OTP
         code = generate_otp()
         expires_at = datetime.utcnow() + timedelta(minutes=10)
         
-        # Stocker l'OTP
         otp = OtpCode(
             id=str(uuid.uuid4()),
             phone=otp_request.phone,
@@ -179,7 +163,6 @@ async def request_otp(otp_request: OtpRequest):
         )
         await db.otp_codes.insert_one(otp.dict(by_alias=True, exclude_none=True))
         
-        # TODO: Envoyer le SMS via Twilio (simulé pour le moment)
         logger.info(f"Code OTP généré pour {otp_request.phone}: {code}")
         
         return {
@@ -195,7 +178,6 @@ async def request_otp(otp_request: OtpRequest):
 async def verify_otp(otp_verify: OtpVerify):
     """Vérification de l'OTP et connexion"""
     try:
-        # Rechercher l'OTP
         otp = await db.otp_codes.find_one({
             "phone": otp_verify.phone,
             "code": otp_verify.code,
@@ -208,17 +190,14 @@ async def verify_otp(otp_verify: OtpVerify):
         if datetime.utcnow() > otp["expiresAt"]:
             raise HTTPException(status_code=401, detail="Code OTP expiré")
         
-        # Marquer l'OTP comme utilisé
         await db.otp_codes.update_one(
             {"_id": otp["_id"]},
             {"$set": {"used": True}}
         )
         
-        # Rechercher ou créer l'utilisateur
         user = await db.users.find_one({"phone": otp_verify.phone})
         
         if not user:
-            # Créer un nouvel utilisateur vendeur par défaut
             user_id = str(uuid.uuid4())
             new_user = User(
                 id=user_id,
@@ -228,7 +207,6 @@ async def verify_otp(otp_verify: OtpVerify):
             await db.users.insert_one(new_user.dict(by_alias=True, exclude_none=True))
             user = new_user.dict()
         
-        # Créer le token
         token = create_jwt_token(
             user["id"],
             user["role"],
@@ -262,22 +240,18 @@ async def create_vendor_profile(
 ):
     """Créer ou mettre à jour le profil vendeur"""
     try:
-        # Vérifier que l'utilisateur est vendeur
         if current_user.get("role") != "VENDOR":
             raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
         
-        # Vérifier si le profil existe déjà
         existing = await db.vendors.find_one({"userId": current_user["user_id"]})
         
         if existing:
-            # Mise à jour
             await db.vendors.update_one(
                 {"userId": current_user["user_id"]},
                 {"$set": vendor_data.dict(exclude_none=True)}
             )
             vendor_id = existing["id"]
         else:
-            # Création
             vendor = Vendor(
                 id=str(uuid.uuid4()),
                 userId=current_user["user_id"],
@@ -346,7 +320,6 @@ async def get_profile(current_user: Dict = Depends(get_current_user)):
             "role": user["role"]
         }
         
-        # Ajouter les informations spécifiques au rôle
         if user["role"] == "VENDOR":
             vendor = await db.vendors.find_one({"userId": user["id"]})
             if vendor:
@@ -459,7 +432,6 @@ async def get_vendor_products(current_user: Dict = Depends(get_current_user)):
         
         vendor_products = await db.vendor_products.find({"vendorId": vendor["id"]}).to_list(1000)
         
-        # Enrichir avec les détails des produits
         enriched = []
         for vp in vendor_products:
             if vp["productType"] == "DefaultProduct":
@@ -527,7 +499,6 @@ async def create_client(
         if not vendor:
             raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
         
-        # Vérifier si le client existe déjà
         existing = await db.clients.find_one({
             "vendorId": vendor["id"],
             "phone": client_data.phone
@@ -588,11 +559,9 @@ async def create_transaction(
         if not vendor:
             raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
         
-        # Calculer le total
         total = sum(item.total for item in transaction_data.items)
         remaining = total - transaction_data.amountPaid
         
-        # Déterminer le statut de paiement
         if transaction_data.amountPaid >= total:
             payment_status = PaymentStatus.PAID
             remaining = 0
@@ -601,13 +570,9 @@ async def create_transaction(
         else:
             payment_status = PaymentStatus.UNPAID
         
-        # Calculer la commission
         platform_fee = calculate_platform_fee(total)
-        
-        # Générer le hash
         tx_hash = hash_transaction(vendor["id"], transaction_data.clientId, total, datetime.utcnow())
         
-        # Créer la transaction
         transaction = Transaction(
             id=str(uuid.uuid4()),
             vendorId=vendor["id"],
@@ -624,14 +589,12 @@ async def create_transaction(
         
         await db.transactions.insert_one(transaction.dict(by_alias=True, exclude_none=True))
         
-        # Mettre à jour la dette du client
         if remaining > 0:
             await db.clients.update_one(
                 {"id": transaction_data.clientId},
                 {"$inc": {"debtBalance": remaining}}
             )
         
-        # Créer une commission
         commission = PlatformCommission(
             id=str(uuid.uuid4()),
             transactionId=transaction.id,
@@ -640,7 +603,6 @@ async def create_transaction(
         )
         await db.platform_commissions.insert_one(commission.dict(by_alias=True, exclude_none=True))
         
-        # Mettre à jour le stock
         for item in transaction_data.items:
             await db.vendor_products.update_one(
                 {
@@ -651,7 +613,6 @@ async def create_transaction(
                 {"$inc": {"stock": -item.quantity}}
             )
             
-            # Log stock movement
             stock_movement = StockMovement(
                 id=str(uuid.uuid4()),
                 vendorId=vendor["id"],
@@ -720,7 +681,6 @@ async def get_wholesaler_products(wholesaler_id: str):
     try:
         products = await db.wholesaler_products.find({"wholesalerId": wholesaler_id}).to_list(1000)
         
-        # Enrichir avec les détails des produits
         enriched = []
         for wp in products:
             if wp["productType"] == "DefaultProduct":
@@ -757,11 +717,9 @@ async def create_order(
         if not vendor:
             raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
         
-        # Calculer le total
         total = sum(item.total for item in order_data.items)
         platform_fee = calculate_platform_fee(total)
         
-        # Créer la commande
         order = Order(
             id=str(uuid.uuid4()),
             wholesalerId=order_data.wholesalerId,
@@ -774,7 +732,6 @@ async def create_order(
         
         await db.orders.insert_one(order.dict(by_alias=True, exclude_none=True))
         
-        # Créer une commission
         commission = PlatformCommission(
             id=str(uuid.uuid4()),
             orderId=order.id,
@@ -879,7 +836,6 @@ async def update_order_status(
 async def get_conversations(current_user: Dict = Depends(get_current_user)):
     """Récupérer toutes les conversations de l'utilisateur"""
     try:
-        # Récupérer le profil
         if current_user["role"] == "VENDOR":
             profile = await db.vendors.find_one({"userId": current_user["user_id"]})
             sender_type = "vendor"
@@ -890,7 +846,6 @@ async def get_conversations(current_user: Dict = Depends(get_current_user)):
         if not profile:
             return []
         
-        # Récupérer les messages où l'utilisateur est expéditeur ou destinataire
         messages = await db.messages.find({
             "$or": [
                 {"senderId": profile["id"]},
@@ -898,13 +853,11 @@ async def get_conversations(current_user: Dict = Depends(get_current_user)):
             ]
         }).sort("createdAt", -1).to_list(1000)
         
-        # Grouper par conversation
         conversations = {}
         for msg in messages:
             other_id = msg["receiverId"] if msg["senderId"] == profile["id"] else msg["senderId"]
             
             if other_id not in conversations:
-                # Compter les messages non lus
                 unread_count = await db.messages.count_documents({
                     "receiverId": profile["id"],
                     "senderId": other_id,
@@ -930,7 +883,6 @@ async def get_messages_with_user(
 ):
     """Récupérer tous les messages avec un utilisateur spécifique"""
     try:
-        # Récupérer le profil
         if current_user["role"] == "VENDOR":
             profile = await db.vendors.find_one({"userId": current_user["user_id"]})
         else:
@@ -939,7 +891,6 @@ async def get_messages_with_user(
         if not profile:
             return []
         
-        # Récupérer les messages
         messages = await db.messages.find({
             "$or": [
                 {"senderId": profile["id"], "receiverId": user_id},
@@ -947,7 +898,6 @@ async def get_messages_with_user(
             ]
         }).sort("createdAt", 1).to_list(1000)
         
-        # Marquer les messages comme lus
         await db.messages.update_many(
             {
                 "receiverId": profile["id"],
@@ -969,7 +919,6 @@ async def send_message(
 ):
     """Envoyer un message"""
     try:
-        # Récupérer le profil
         if current_user["role"] == "VENDOR":
             profile = await db.vendors.find_one({"userId": current_user["user_id"]})
             sender_type = "vendor"
@@ -980,7 +929,6 @@ async def send_message(
         if not profile:
             raise HTTPException(status_code=404, detail="Profil non trouvé")
         
-        # Créer le message
         message = Message(
             id=str(uuid.uuid4()),
             senderId=profile["id"],
@@ -1000,74 +948,6 @@ async def send_message(
         raise
     except Exception as e:
         logger.error(f"Erreur envoi message: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# ROUTES CHATBOT IA
-# ============================================================================
-
-@api_router.post("/chat")
-async def chat_with_assistant(
-    chat_request: ChatRequest,
-    current_user: Dict = Depends(get_current_user)
-):
-    """Discuter avec l'assistant IA"""
-    try:
-        # Créer le contexte système selon la langue
-        system_messages = {
-            "fr": "Tu es l'assistant de Bor-bi Tech, une application de gestion pour commerçants en Afrique. Réponds de manière claire, courte et utile. Aide les utilisateurs avec leurs questions sur la gestion des ventes, des stocks, des clients et des commandes.",
-            "wo": "Yow assistant yu Bor-bi Tech. Defal utilisateurs yi ci questions yu am ci gestion vente, stock, client ak commande.",
-            "ar": "أنت مساعد Bor-bi Tech، تطبيق إدارة للتجار في أفريقيا. أجب بوضوح وباختصار. ساعد المستخدمين في أسئلتهم حول إدارة المبيعات والمخزون والعملاء والطلبات."
-        }
-        
-        system_message = system_messages.get(chat_request.language, system_messages["fr"])
-        
-        # Créer le chat LLM
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=current_user["user_id"],
-            system_message=system_message
-        ).with_model("openai", "gpt-5.2")
-        
-        # Envoyer le message
-        user_message = UserMessage(text=chat_request.question)
-        response = await chat.send_message(user_message)
-        
-        # Sauvegarder dans l'historique
-        chat_message = ChatMessage(
-            id=str(uuid.uuid4()),
-            userId=current_user["user_id"],
-            userRole=current_user["role"],
-            question=chat_request.question,
-            answer=response,
-            language=chat_request.language
-        )
-        await db.chat_messages.insert_one(chat_message.dict(by_alias=True, exclude_none=True))
-        
-        return {"answer": response}
-    except Exception as e:
-        logger.error(f"Erreur chat assistant: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# ROUTES IA VOCALE (WHISPER)
-# ============================================================================
-
-@api_router.post("/voice/transcribe")
-async def transcribe_audio(
-    voice_data: VoiceTranscription,
-    current_user: Dict = Depends(get_current_user)
-):
-    """Transcrire un audio en texte avec Whisper"""
-    try:
-        # TODO: Implémenter Whisper pour transcription audio
-        # Pour le moment, retourner un placeholder
-        return {
-            "transcription": "Transcription audio non encore implémentée. En attente de l'intégration OpenAI Whisper.",
-            "parsed": None
-        }
-    except Exception as e:
-        logger.error(f"Erreur transcription audio: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
@@ -1105,7 +985,6 @@ async def upload_image(
 async def get_homepage_products():
     """Récupérer les produits sponsorisés pour la page d'accueil"""
     try:
-        # Récupérer les produits sponsorisés actifs
         now = datetime.utcnow()
         sponsored = await db.sponsored_products.find({
             "active": True,
@@ -1113,7 +992,6 @@ async def get_homepage_products():
             "endDate": {"$gte": now}
         }).sort("homepageOrder", 1).limit(50).to_list(50)
         
-        # Enrichir avec les détails des produits
         products = []
         for sp in sponsored:
             product = await db.default_products.find_one({"id": sp["defaultProductId"]})
@@ -1137,18 +1015,15 @@ async def get_homepage_products():
 async def get_admin_dashboard(current_user: Dict = Depends(get_current_user)):
     """Récupérer les statistiques pour le tableau de bord admin"""
     try:
-        # Vérifier que l'utilisateur est admin
         if current_user.get("email") != ADMIN_EMAIL:
             raise HTTPException(status_code=403, detail="Accès réservé à l'administrateur")
         
-        # Statistiques générales
         total_users = await db.users.count_documents({})
         total_vendors = await db.vendors.count_documents({})
         total_wholesalers = await db.wholesalers.count_documents({})
         total_transactions = await db.transactions.count_documents({})
         total_orders = await db.orders.count_documents({})
         
-        # Revenus de commissions
         commissions = await db.platform_commissions.find({}).to_list(10000)
         total_commissions = sum(c["amountCents"] for c in commissions)
         pending_commissions = sum(c["amountCents"] for c in commissions if c["status"] == "PENDING")
@@ -1164,7 +1039,7 @@ async def get_admin_dashboard(current_user: Dict = Depends(get_current_user)):
                 "orders": total_orders
             },
             "commissions": {
-                "total": total_commissions / 100,  # Convert to FCFA
+                "total": total_commissions / 100,
                 "pending": pending_commissions / 100
             }
         }
