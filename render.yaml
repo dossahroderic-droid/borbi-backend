@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: borbi-api
+    runtime: python
+    repo: https://github.com/dossahroderic-droid/borbi-backend
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        value: borbi_tech
+      - key: JWT_SECRET
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: PLATFORM_FEE_RATE
+        value: "0.5"
+      - key: ADMIN_EMAIL
+        value: pauledoux@protonmail.com
+      - key: EXCHANGE_RATE_USD_XOF
+        value: "600"
+      - key: EXCHANGE_RATE_EUR_XOF
+        value: "655"
