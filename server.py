@@ -16,6 +16,7 @@ import base64
 import io
 import cloudinary
 import cloudinary.uploader
+import subprocess
 
 # Import des modèles et utilitaires
 from models import *
@@ -1087,6 +1088,23 @@ async def create_sponsored_product(
     except Exception as e:
         logger.error(f"Erreur création produit sponsorisé: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ROUTES SEED (pour remplir la base de données)
+# ============================================================================
+
+@api_router.post("/seed")
+async def seed_database():
+    """Lancer le seeding des produits"""
+    try:
+        result = subprocess.run(["python", "seed.py"], capture_output=True, text=True)
+        return {
+            "status": "ok",
+            "output": result.stdout,
+            "error": result.stderr
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 # ============================================================================
 # ROUTE RACINE & HEALTH CHECK
