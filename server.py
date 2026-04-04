@@ -2,7 +2,7 @@
 Bor-bi Tech by TransTech Solution - Backend API
 Application complète de gestion pour vendeurs et grossistes
 """
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
@@ -14,6 +14,8 @@ from typing import Optional, List, Dict, Any
 import uuid
 import base64
 import io
+import cloudinary
+import cloudinary.uploader
 
 # Import des modèles et utilitaires
 from models import *
@@ -30,6 +32,13 @@ mongo_url = os.environ['MONGO_URL']
 db_name = os.environ['DB_NAME']
 client = AsyncIOMotorClient(mongo_url)
 db = client[db_name]
+
+# Configuration Cloudinary
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
 
 # Configuration
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "pauledoux@protonmail.com")
@@ -1059,6 +1068,33 @@ async def transcribe_audio(
         }
     except Exception as e:
         logger.error(f"Erreur transcription audio: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ROUTES UPLOAD IMAGES (CLOUDINARY)
+# ============================================================================
+
+@api_router.post("/upload")
+async def upload_image(
+    file: UploadFile = File(...),
+    current_user: Dict = Depends(get_current_user)
+):
+    """Upload une image vers Cloudinary"""
+    try:
+        contents = await file.read()
+        
+        result = cloudinary.uploader.upload(
+            contents,
+            folder="borbi_products",
+            transformation={"width": 800, "height": 800, "crop": "limit"}
+        )
+        
+        return {
+            "url": result["secure_url"],
+            "public_id": result["public_id"]
+        }
+    except Exception as e:
+        logger.error(f"Erreur upload image: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
