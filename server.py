@@ -659,6 +659,519 @@ async def get_vendor_transactions(current_user: Dict = Depends(get_current_user)
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# ROUTES VENDEUR - TABLEAU DE BORD & ALERTES
+# ============================================================================
+
+@api_router.get("/vendors/dashboard")
+async def get_vendor_dashboard(current_user: Dict = Depends(get_current_user)):
+    """Récupérer toutes les données du tableau de bord vendeur"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        # Ventes du jour (aujourd'hui à minuit)
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_transactions = await db.transactions.find({
+            "vendorId": vendor["id"],
+            "createdAt": {"$gte": today_start}
+        }).to_list(1000)
+        sales_today = sum(t["totalCents"] for t in today_transactions) / 100
+        
+        # Créances totales (dettes clients)
+        clients = await db.clients.find({"vendorId": vendor["id"]}).to_list(1000)
+        total_debts = sum(c["debtBalance"] for c in clients) / 100
+        
+        # Produits actifs en stock
+        vendor_products = await db.vendor_products.find({"vendorId": vendor["id"]}).to_list(1000)
+        active_products = sum(1 for p in vendor_products if p["stock"] > 0)
+        low_stock_products = [p for p in vendor_products if p["stock"] <= p.get("lowStockAlert", 5) and p["stock"] > 0]
+        
+        # Clients avec dette > 10 jours
+        ten_days_ago = datetime.utcnow() - timedelta(days=10)
+        debt_clients = []
+        for c in clients:
+            if c["debtBalance"] > 0:
+                last_tx = await db.transactions.find_one(
+                    {"clientId": c["id"], "vendorId": vendor["id"]},
+                    sort=[("createdAt", -1)]
+                )
+                if last_tx and last_tx["createdAt"] < ten_days_ago:
+                    debt_clients.append(c)
+        
+        # Ventes récentes (8 dernières)
+        recent_transactions = await db.transactions.find(
+            {"vendorId": vendor["id"]}
+        ).sort("createdAt", -1).limit(8).to_list(8)
+        
+        for tx in recent_transactions:
+            client = await db.clients.find_one({"id": tx["clientId"]})
+            tx["clientName"] = client["name"] if client else "Inconnu"
+        
+        # Résumé semaine (7 derniers jours)
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        week_transactions = await db.transactions.find({
+            "vendorId": vendor["id"],
+            "createdAt": {"$gte": week_ago}
+        }).to_list(1000)
+        week_sales = sum(t["totalCents"] for t in week_transactions) / 100
+        new_clients_week = await db.clients.count_documents({
+            "vendorId": vendor["id"],
+            "createdAt": {"$gte": week_ago}
+        })
+        
+        # Produit le plus vendu
+        product_sales = {}
+        for tx in week_transactions:
+            for item in tx["items"]:
+                product_sales[item["productId"]] = product_sales.get(item["productId"], 0) + item["quantity"]
+        top_product_id = max(product_sales, key=product_sales.get, default=None) if product_sales else None
+        top_product = None
+        if top_product_id:
+            top_product = await db.default_products.find_one({"id": top_product_id})
+        
+        # Commandes grossistes en attente
+        pending_orders = await db.orders.find({
+            "vendorId": vendor["id"],
+            "status": "PENDING"
+        }).to_list(1000)
+        
+        # Produits sponsorisés actifs
+        now = datetime.utcnow()
+        sponsored = await db.sponsored_products.find({
+            "active": True,
+            "startDate": {"$lte": now},
+            "endDate": {"$gte": now}
+        }).to_list(50)
+        
+        sponsored_products = []
+        for sp in sponsored:
+            product = await db.default_products.find_one({"id": sp["defaultProductId"]})
+            if product:
+                sponsored_products.append(product)
+        
+        return {
+            "sales_today": sales_today,
+            "total_debts": total_debts,
+            "active_products": active_products,
+            "low_stock_count": len(low_stock_products),
+            "low_stock_products": low_stock_products,
+            "debt_clients": debt_clients,
+            "pending_orders_count": len(pending_orders),
+            "recent_transactions": recent_transactions,
+            "week_sales": week_sales,
+            "new_clients_week": new_clients_week,
+            "top_product": top_product,
+            "sponsored_products": sponsored_products
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dashboard vendeur: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ROUTES VENDEUR - NOUVELLE VENTE
+# ============================================================================
+
+@api_router.get("/vendors/products/search")
+async def search_vendor_products(
+    q: str = "",
+    category: Optional[str] = None,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Rechercher des produits dans le catalogue du vendeur"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            return []
+        
+        vendor_products = await db.vendor_products.find({"vendorId": vendor["id"]}).to_list(1000)
+        
+        results = []
+        for vp in vendor_products:
+            if vp["productType"] == "DefaultProduct":
+                product = await db.default_products.find_one({"id": vp["productId"]})
+            else:
+                product = await db.custom_products.find_one({"id": vp["productId"]})
+            
+            if product:
+                if q and q.lower() not in product.get("nameFr", "").lower() and q.lower() not in product.get("nameWolof", "").lower():
+                    continue
+                if category and product.get("category") != category:
+                    continue
+                
+                sponsored = await db.sponsored_products.find_one({
+                    "defaultProductId": vp["productId"],
+                    "active": True,
+                    "endDate": {"$gte": datetime.utcnow()}
+                })
+                
+                results.append({
+                    **vp,
+                    "productDetails": product,
+                    "isSponsored": sponsored is not None
+                })
+        
+        results.sort(key=lambda x: (not x.get("isSponsored", False), x.get("productDetails", {}).get("nameFr", "")))
+        
+        return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur recherche produits: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/vendors/transactions/receipt/{transaction_id}")
+async def get_transaction_receipt(
+    transaction_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Récupérer un reçu de transaction (pour impression)"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        transaction = await db.transactions.find_one({
+            "id": transaction_id,
+            "vendorId": vendor["id"]
+        })
+        if not transaction:
+            raise HTTPException(status_code=404, detail="Transaction non trouvée")
+        
+        client = await db.clients.find_one({"id": transaction["clientId"]})
+        
+        return {
+            "transaction": transaction,
+            "client": client,
+            "vendor": vendor,
+            "date": transaction["createdAt"].isoformat(),
+            "hash": transaction["hash"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur récupération reçu: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ROUTES VENDEUR - GESTION STOCK
+# ============================================================================
+
+@api_router.patch("/vendors/products/{product_id}")
+async def update_vendor_product(
+    product_id: str,
+    update_data: dict,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Modifier un produit du vendeur (prix, stock, seuil d'alerte)"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        result = await db.vendor_products.update_one(
+            {"id": product_id, "vendorId": vendor["id"]},
+            {"$set": update_data, "$set": {"updatedAt": datetime.utcnow()}}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
+        
+        return {"message": "Produit mis à jour"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur mise à jour produit: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.delete("/vendors/products/{product_id}")
+async def remove_vendor_product(
+    product_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Retirer un produit du stock du vendeur (soft delete)"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        result = await db.vendor_products.delete_one({
+            "id": product_id,
+            "vendorId": vendor["id"]
+        })
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Produit non trouvé")
+        
+        return {"message": "Produit retiré du stock"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur suppression produit: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/vendors/stock-movements")
+async def get_stock_movements(
+    product_id: Optional[str] = None,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Historique des mouvements de stock"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            return []
+        
+        query = {"vendorId": vendor["id"]}
+        if product_id:
+            query["productId"] = product_id
+        
+        movements = await db.stock_movements.find(query).sort("createdAt", -1).limit(100).to_list(100)
+        return movements
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur récupération mouvements stock: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/vendors/stock/adjust")
+async def adjust_stock(
+    adjustment: dict,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Ajuster manuellement le stock (réappro, correction)"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        product_id = adjustment.get("productId")
+        quantity_change = adjustment.get("quantityChange")
+        reason = adjustment.get("reason", "adjustment")
+        
+        if not product_id or quantity_change is None:
+            raise HTTPException(status_code=400, detail="productId et quantityChange requis")
+        
+        await db.vendor_products.update_one(
+            {"id": product_id, "vendorId": vendor["id"]},
+            {"$inc": {"stock": quantity_change}}
+        )
+        
+        movement = StockMovement(
+            id=str(uuid.uuid4()),
+            vendorId=vendor["id"],
+            productId=product_id,
+            productType="VendorProduct",
+            quantityChange=quantity_change,
+            reason=reason,
+            referenceId=adjustment.get("referenceId")
+        )
+        await db.stock_movements.insert_one(movement.dict(by_alias=True, exclude_none=True))
+        
+        return {"message": "Stock ajusté", "movementId": movement.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur ajustement stock: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ROUTES VENDEUR - GESTION CLIENTS (AVANCÉE)
+# ============================================================================
+
+@api_router.post("/vendors/clients/{client_id}/payment")
+async def record_client_payment(
+    client_id: str,
+    payment_data: dict,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Enregistrer un paiement reçu d'un client"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        amount = payment_data.get("amountCents", 0)
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="Montant invalide")
+        
+        client = await db.clients.find_one({"id": client_id, "vendorId": vendor["id"]})
+        if not client:
+            raise HTTPException(status_code=404, detail="Client non trouvé")
+        
+        new_debt = max(0, client["debtBalance"] - amount)
+        await db.clients.update_one(
+            {"id": client_id},
+            {"$set": {"debtBalance": new_debt}}
+        )
+        
+        payment = Payment(
+            id=str(uuid.uuid4()),
+            transactionId=payment_data.get("transactionId"),
+            amountCents=amount,
+            previousDebt=client["debtBalance"],
+            newDebt=new_debt
+        )
+        await db.payments.insert_one(payment.dict(by_alias=True, exclude_none=True))
+        
+        return {
+            "message": "Paiement enregistré",
+            "new_debt": new_debt / 100,
+            "amount_paid": amount / 100
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur enregistrement paiement: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/vendors/clients/{client_id}/send-sms")
+async def send_sms_to_client(
+    client_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Envoyer un SMS de relance au client"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        client = await db.clients.find_one({"id": client_id, "vendorId": vendor["id"]})
+        if not client:
+            raise HTTPException(status_code=404, detail="Client non trouvé")
+        
+        time_of_day = "morning" if datetime.utcnow().hour < 18 else "evening"
+        message = format_sms_message(client["name"], client["debtBalance"], client["preferredLanguage"], time_of_day)
+        
+        sms_log = SmsLog(
+            id=str(uuid.uuid4()),
+            clientId=client["id"],
+            phone=client["phone"],
+            message=message,
+            language=client["preferredLanguage"],
+            status="sent"
+        )
+        await db.sms_logs.insert_one(sms_log.dict(by_alias=True, exclude_none=True))
+        
+        return {
+            "message": "SMS envoyé",
+            "sms_content": message,
+            "language": client["preferredLanguage"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur envoi SMS: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/vendors/clients/{client_id}/full")
+async def get_client_full_details(
+    client_id: str,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Fiche détaillée d'un client (historique, stats)"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Profil vendeur non trouvé")
+        
+        client = await db.clients.find_one({"id": client_id, "vendorId": vendor["id"]})
+        if not client:
+            raise HTTPException(status_code=404, detail="Client non trouvé")
+        
+        transactions = await db.transactions.find({
+            "clientId": client_id,
+            "vendorId": vendor["id"]
+        }).sort("createdAt", -1).to_list(100)
+        
+        payments = await db.payments.find({
+            "transactionId": {"$in": [t["id"] for t in transactions]}
+        }).to_list(100)
+        
+        sms_logs = await db.sms_logs.find({"clientId": client_id}).sort("sentAt", -1).to_list(50)
+        
+        total_purchased = sum(t["totalCents"] for t in transactions) / 100
+        
+        return {
+            "client": client,
+            "transactions": transactions,
+            "payments": payments,
+            "sms_logs": sms_logs,
+            "total_purchased": total_purchased,
+            "current_debt": client["debtBalance"] / 100
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur fiche client: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/vendors/clients/debts")
+async def get_clients_with_debt(
+    days_overdue: int = 10,
+    current_user: Dict = Depends(get_current_user)
+):
+    """Clients avec dette non réglée depuis X jours"""
+    try:
+        if current_user.get("role") != "VENDOR":
+            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
+        
+        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
+        if not vendor:
+            return []
+        
+        clients = await db.clients.find({"vendorId": vendor["id"], "debtBalance": {"$gt": 0}}).to_list(1000)
+        
+        cutoff_date = datetime.utcnow() - timedelta(days=days_overdue)
+        result = []
+        
+        for client in clients:
+            last_tx = await db.transactions.find_one(
+                {"clientId": client["id"], "vendorId": vendor["id"]},
+                sort=[("createdAt", -1)]
+            )
+            if last_tx and last_tx["createdAt"] < cutoff_date:
+                result.append(client)
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur clients avec dette: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
 # ROUTES GROSSISTES
 # ============================================================================
 
