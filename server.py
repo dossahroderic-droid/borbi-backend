@@ -1634,8 +1634,85 @@ async def root():
 @api_router.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
 # ============================================================================
+# ROUTES RÉINITIALISATION MOT DE PASSE
+# ============================================================================
+
+@api_router.post("/auth/forgot-password")
+async def forgot_password(request: dict):
+    """Demander un lien de réinitialisation (email ou téléphone)"""
+    try:
+        identifier = request.get("identifier")
+        if not identifier:
+            raise HTTPException(status_code=400, detail="Email ou téléphone requis")
+        
+        user = await db.users.find_one({
+            "$or": [
+                {"email": identifier},
+                {"phone": identifier}
+            ]
+        })
+        
+        if not user:
+            return {"message": "Si un compte existe, un lien de réinitialisation a été envoyé"}
+        
+        reset_token = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(hours=1)
+        
+        await db.password_resets.insert_one({
+            "userId": user["id"],
+            "token": reset_token,
+            "expiresAt": expires_at,
+            "used": False,
+            "createdAt": datetime.utcnow()
+        })
+        
+        reset_link = f"https://borbi-frontend.vercel.app/reset-password?token={reset_token}"
+        print(f"Lien de réinitialisation: {reset_link}")
+        
+        return {"message": "Si un compte existe, un lien de réinitialisation a été envoyé"}
+    except Exception as e:
+        logger.error(f"Erreur forgot password: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/auth/reset-password")
+async def reset_password(request: dict):
+    """Réinitialiser le mot de passe avec un token"""
+    try:
+        token = request.get("token")
+        new_password = request.get("new_password")
+        
+        if not token or not new_password:
+            raise HTTPException(status_code=400, detail="Token et nouveau mot de passe requis")
+        
+        reset = await db.password_resets.find_one({"token": token, "used": False})
+        
+        if not reset:
+            raise HTTPException(status_code=400, detail="Token invalide ou expiré")
+        
+        if datetime.utcnow() > reset["expiresAt"]:
+            raise HTTPException(status_code=400, detail="Token expiré")
+        
+        new_hash = hash_password(new_password)
+        await db.users.update_one(
+            {"id": reset["userId"]},
+            {"$set": {"passwordHash": new_hash}}
+        )
+        
+        await db.password_resets.update_one(
+            {"token": token},
+            {"$set": {"used": True}}
+        )
+        
+        await log_audit(db, reset["userId"], "", "reset_password")
+        
+        return {"message": "Mot de passe réinitialisé avec succès"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur reset password: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+#============================================================================
 # INCLURE LE ROUTER
 # ============================================================================
 
