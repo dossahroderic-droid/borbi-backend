@@ -52,7 +52,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# ROUTES D'AUTHENTIFICATION (existantes)
+# ROUTES D'AUTHENTIFICATION
 # ============================================================================
 
 @api_router.post("/auth/register")
@@ -88,9 +88,10 @@ async def login(credentials: UserLogin):
         })
         if not user:
             raise HTTPException(status_code=401, detail="Identifiants invalides")
-        if credentials.password:
-            if not user.get("passwordHash") or not verify_password(credentials.password, user["passwordHash"]):
-                raise HTTPException(status_code=401, detail="Identifiants invalides")
+        if not user.get("passwordHash"):
+            raise HTTPException(status_code=401, detail="Mot de passe non configuré")
+        if not verify_password(credentials.password, user["passwordHash"]):
+            raise HTTPException(status_code=401, detail="Identifiants invalides")
         token = create_jwt_token(user["id"], user["role"], user.get("email"), user.get("phone"))
         await log_audit(db, user["id"], user.get("email") or user.get("phone"), "login")
         return {"message": "Connexion réussie", "token": token, "user": user}
@@ -129,31 +130,6 @@ async def get_default_products(category: Optional[str] = None, search: Optional[
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# ROUTES VENDEUR - STOCK
-# ============================================================================
-
-@api_router.get("/vendors/products")
-async def get_vendor_products(current_user: Dict = Depends(get_current_user)):
-    try:
-        if current_user.get("role") != "VENDOR":
-            raise HTTPException(status_code=403, detail="Accès réservé aux vendeurs")
-        vendor = await db.vendors.find_one({"userId": current_user["user_id"]})
-        if not vendor: return []
-        vendor_products = await db.vendor_products.find({"vendorId": vendor["id"]}).to_list(1000)
-        enriched = []
-        for vp in vendor_products:
-            if vp["productType"] == "DefaultProduct":
-                product = await db.default_products.find_one({"id": vp["productId"]})
-            else:
-                product = await db.custom_products.find_one({"id": vp["productId"]})
-            if product:
-                enriched.append({**vp, "productDetails": product})
-        return enriched
-    except Exception as e:
-        logger.error(f"Erreur récupération produits vendeur: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
 # ROUTES UPLOAD IMAGES (Cloudinary)
 # ============================================================================
 
@@ -162,16 +138,13 @@ async def upload_product_image(
     file: UploadFile = File(...),
     current_user: Dict = Depends(get_current_user)
 ):
-    """Upload une image vers Cloudinary (authentification requise)"""
     try:
         allowed_types = ["image/jpeg", "image/png", "image/webp"]
         if file.content_type not in allowed_types:
             raise HTTPException(status_code=400, detail="Type de fichier non autorisé (JPG, PNG, WebP uniquement)")
-        
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 5 Mo)")
-        
         result = cloudinary.uploader.upload(
             contents,
             folder="borbi_products",
@@ -183,19 +156,6 @@ async def upload_product_image(
     except Exception as e:
         logger.error(f"Erreur upload image: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# ROUTE SEED (optionnel)
-# ============================================================================
-
-@api_router.post("/seed")
-async def seed_database():
-    try:
-        import subprocess
-        result = subprocess.run(["python", "seed.py"], capture_output=True, text=True)
-        return {"status": "ok", "output": result.stdout, "error": result.stderr}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 # ============================================================================
 # ROUTE RACINE & HEALTH
