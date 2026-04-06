@@ -101,6 +101,44 @@ async def login(credentials: UserLogin):
         logger.error(f"Erreur login: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@api_router.post("/auth/request-otp")
+async def request_otp(otp_request: OtpRequest):
+    try:
+        code = generate_otp()
+        expires_at = datetime.utcnow() + timedelta(minutes=10)
+        otp = OtpCode(
+            id=str(uuid.uuid4()),
+            phone=otp_request.phone,
+            code=code,
+            expiresAt=expires_at
+        )
+        await db.otp_codes.insert_one(otp.dict(by_alias=True, exclude_none=True))
+        return {"message": "Code OTP envoyé", "debug_code": code if os.getenv("DEBUG") else None}
+    except Exception as e:
+        logger.error(f"Erreur OTP: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/auth/verify-otp")
+async def verify_otp(otp_verify: OtpVerify):
+    try:
+        otp = await db.otp_codes.find_one({"phone": otp_verify.phone, "code": otp_verify.code, "used": False})
+        if not otp:
+            raise HTTPException(status_code=401, detail="Code OTP invalide")
+        if datetime.utcnow() > otp["expiresAt"]:
+            raise HTTPException(status_code=401, detail="Code OTP expiré")
+        await db.otp_codes.update_one({"_id": otp["_id"]}, {"$set": {"used": True}})
+        user = await db.users.find_one({"phone": otp_verify.phone})
+        if not user:
+            user_id = str(uuid.uuid4())
+            new_user = User(id=user_id, phone=otp_verify.phone, role=Role.VENDOR)
+            await db.users.insert_one(new_user.dict(by_alias=True, exclude_none=True))
+            user = new_user.dict()
+        token = create_jwt_token(user["id"], user["role"], user.get("email"), user.get("phone"))
+        return {"message": "Connexion réussie", "token": token, "user": user}
+    except Exception as e:
+        logger.error(f"Erreur vérification OTP: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # ROUTES PRODUITS
 # ============================================================================
