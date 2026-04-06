@@ -14,20 +14,17 @@ import uuid
 import cloudinary
 import cloudinary.uploader
 
-# Import des modèles et utilitaires
 from models import *
 from utils import *
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# Configuration MongoDB
 mongo_url = os.environ['MONGO_URL']
 db_name = os.environ['DB_NAME']
 client = AsyncIOMotorClient(mongo_url)
 db = client[db_name]
 
-# Configuration Cloudinary
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
@@ -39,7 +36,6 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "pauledoux@protonmail.com")
 app = FastAPI(title="Bor-bi Tech API", version="1.0.0")
 api_router = APIRouter(prefix="/api")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -52,7 +48,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# ROUTES D'AUTHENTIFICATION
+# AUTHENTIFICATION
 # ============================================================================
 
 @api_router.post("/auth/register")
@@ -101,46 +97,8 @@ async def login(credentials: UserLogin):
         logger.error(f"Erreur login: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.post("/auth/request-otp")
-async def request_otp(otp_request: OtpRequest):
-    try:
-        code = generate_otp()
-        expires_at = datetime.utcnow() + timedelta(minutes=10)
-        otp = OtpCode(
-            id=str(uuid.uuid4()),
-            phone=otp_request.phone,
-            code=code,
-            expiresAt=expires_at
-        )
-        await db.otp_codes.insert_one(otp.dict(by_alias=True, exclude_none=True))
-        return {"message": "Code OTP envoyé", "debug_code": code if os.getenv("DEBUG") else None}
-    except Exception as e:
-        logger.error(f"Erreur OTP: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@api_router.post("/auth/verify-otp")
-async def verify_otp(otp_verify: OtpVerify):
-    try:
-        otp = await db.otp_codes.find_one({"phone": otp_verify.phone, "code": otp_verify.code, "used": False})
-        if not otp:
-            raise HTTPException(status_code=401, detail="Code OTP invalide")
-        if datetime.utcnow() > otp["expiresAt"]:
-            raise HTTPException(status_code=401, detail="Code OTP expiré")
-        await db.otp_codes.update_one({"_id": otp["_id"]}, {"$set": {"used": True}})
-        user = await db.users.find_one({"phone": otp_verify.phone})
-        if not user:
-            user_id = str(uuid.uuid4())
-            new_user = User(id=user_id, phone=otp_verify.phone, role=Role.VENDOR)
-            await db.users.insert_one(new_user.dict(by_alias=True, exclude_none=True))
-            user = new_user.dict()
-        token = create_jwt_token(user["id"], user["role"], user.get("email"), user.get("phone"))
-        return {"message": "Connexion réussie", "token": token, "user": user}
-    except Exception as e:
-        logger.error(f"Erreur vérification OTP: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 # ============================================================================
-# ROUTES PRODUITS
+# PRODUITS
 # ============================================================================
 
 def serialize_doc(doc):
@@ -168,7 +126,7 @@ async def get_default_products(category: Optional[str] = None, search: Optional[
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# ROUTES UPLOAD IMAGES (Cloudinary)
+# UPLOAD IMAGES
 # ============================================================================
 
 @api_router.post("/upload-image")
@@ -179,7 +137,7 @@ async def upload_product_image(
     try:
         allowed_types = ["image/jpeg", "image/png", "image/webp"]
         if file.content_type not in allowed_types:
-            raise HTTPException(status_code=400, detail="Type de fichier non autorisé (JPG, PNG, WebP uniquement)")
+            raise HTTPException(status_code=400, detail="Type de fichier non autorisé")
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 5 Mo)")
@@ -196,7 +154,7 @@ async def upload_product_image(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# ROUTE RACINE & HEALTH
+# HEALTH
 # ============================================================================
 
 @api_router.get("/")
@@ -207,10 +165,8 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-# Inclure le router
 app.include_router(api_router)
 
-# Shutdown
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
